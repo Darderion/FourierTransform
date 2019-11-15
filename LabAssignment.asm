@@ -338,10 +338,11 @@ RecoverSignal PROC	; [RCX] - Signal
 	
 	fld dword ptr [RDX + (2 + 8) * 4 ]	; loading Im(x[2])
 	fld dword ptr [RDX + (6 + 8) * 4 ]	; loading Im(x[6])
-	fld ST(1)
+	fld ST(0)
 		; calculating Im(o[1]) = Im(x[2]) - Im(x[6])
 		; o[1] * w(1, n) = o[1] * (-i)
 		; Im(x[2]) - Im(x[6]) = Re(o[1])
+		; Reverse butterfly method -> Re(o[1]) = Im(x[6]) - Im(x[2])
 	fsub ST(0), ST(2)
 	fstp dword ptr [RSP + 3 * 4		  ]	; storing Re(o[1])
 	finit								; clearing ST
