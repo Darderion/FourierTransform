@@ -1,10 +1,246 @@
+; -------------------------------------------------------------------------------------	;
+;	Лабораторная работа №2 по курсу "Программирование на языке ассемблера"				;
+;	Вариант №1.2																		;
+;	Выполнил студент Макеев Владислав													;
+;																						;
+;	Исходный модуль LabAssignment.asm													;
+;	Содержит функции на языке ассемблера, разработанные в соответствии с заданием		;
+; -------------------------------------------------------------------------------------	;
+;	Задание: Реализовать прямое и обратное преобразования Фурье
+;	Формат данных сигнала: __int8
+;	Формат данных спектра: float
+;	Размер (количество отсчетов) сигнала и спектра: 8
+;	Способ реализации: DFT 2x2 + 2 бабочки
+;	Отсчеты спектра являются комплексными числами. Причем действительные части хранятся
+;	в первой половине массива, а мнимые - во второй
 
-; -------------------------------------------------------------------------------------	;
-; Лабораторная работа №2																;
-; Вариант 1.2																			;
-; -------------------------------------------------------------------------------------	;
+.DATA
+	; Вектора-множители для выбора направления Spectrum <-> Signal
+	NormalMV	dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+	ImMV		dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	0bf800000h
+				dword	0bf800000h
+				dword	0bf800000h
+				dword	0bf800000h
+	XImMV		dword	0bf800000h
+				dword	0bf800000h
+				dword	3f800000h
+				dword	3f800000h
+				dword	0bf800000h
+				dword	0bf800000h
+				dword	0bf800000h
+				dword	0bf800000h
+	; Вектора-множители для векторов oU (Вектор O верхней части бабочки), oB (Нижней бабочки) и O
+		; ReRMV = < 0, 0, 0, 0,			1, 1, -1, -1 >
+	ReRMV		dword 0bf800000h
+				dword 0bf800000h
+				dword 3f800000h
+				dword 3f800000h
+				dword 00000000h
+				dword 00000000h
+				dword 00000000h
+				dword 00000000h
+		; ImRMV = < -1, -1, 1, 1,			0, 0, 0, 0 >
+	ImRMV		dword 00000000h
+				dword 00000000h
+				dword 00000000h
+				dword 00000000h
+				dword 3f800000h
+				dword 3f800000h
+				dword 0bf800000h
+				dword 0bf800000h
+		; ReIMV = < -1, -1, 1, 1,			0, 0, 0, 0 >
+	ReIMV		dword 00000000h
+				dword 00000000h
+				dword 00000000h
+				dword 00000000h
+				dword 0bf800000h
+				dword 0bf800000h
+				dword 3f800000h
+				dword 3f800000h
+		; XReRMV = < 1, s, 0, -s, -1, -s, 0, s >
+	XReRMV	dword	00000000h
+				dword	00000000h
+				dword	0bf800000h
+				dword	3f800000h
+				dword	3f3504f3h
+				dword	0bf3504f7h
+				dword	0bf3504f7h
+				dword	3f3504f3h
+		; XReIMV = < 0, s, 1, s, 0, -s, -1, -s >
+	XReIMV	dword	0bf800000h
+				dword	3f800000h
+				dword	00000000h
+				dword	00000000h
+				dword	0bf3504f7h
+				dword	3f3504f3h
+				dword	0bf3504f7h
+				dword	3f3504f3h
+		; XImRMV = [ 1, -1, 0, 0, s, -s, s, -s ]
+	XImRMV		dword	3f800000h
+				dword	0bf800000h
+				dword	00000000h
+				dword	00000000h
+				dword	3f3504f3h
+				dword	0bf3504f7h
+				dword	3f3504f3h
+				dword	0bf3504f7h
+	; Вектор чисел 1/8
+	const18		dword	3e000000h
+				dword	3e000000h
+				dword	3e000000h
+				dword	3e000000h
+				dword	3e000000h
+				dword	3e000000h
+				dword	3e000000h
+				dword	3e000000h
 
 .CODE
+
+ProcessLOandLE PROC							;
+											; ymm0/1=Re/Im	@ x3/7,x2/6,x1/5,x0/4
+	vaddps xmm2, xmm0, xmm1					; ymm2 = Re/Im	@ o0b, o0u, e0b, e0u,	0, 0, 0, 0
+	vsubps xmm3, xmm0, xmm1					; ymm3 = Re/Im	@ o1b, o1u, e1b, e1u,	0, 0, 0, 0
+	vperm2f128 ymm4, ymm2, ymm3, 00100000b	; ymm4 = Re/Im	@ o0B, o0U, e0B, e0U,	o1B, o1U, e1B, e1U
+	vpermilps ymm5, ymm4, 00010001b			; ymm5 = Re/Im	@ o0U, o0B, o0U, o0B,	o1U, o1B, o1U, o1B
+	vpermilps ymm6, ymm4, 10111011b			; ymm6 = Re/Im	@ e0U, e0B, e0U, e0B,	e1U, e1B, e1U, e1B
+	ret
+ProcessLOandLE ENDP
+
+FourierTransform PROC	; Вспомогательная функция, содержащая общие для вычисления спектра и сигнала методы
+		; [RCX]- результирующий вектор
+		; Обозначения:
+		;	e[i]- верхний вектор длины 4
+		;	o[i]- нижний вектор длины 4
+		;	E[i]- верхний вектор длины 8
+		;	O[i]- нижний вектор длины 8
+		
+		; Символ @ обозначает то же, что и пара { [, ] } с тем различием,
+		;	что элементы отображаются в обратном порядке
+		; ymm0 = Re @ x3, x2, x1, x0, 0, 0, 0, 0
+		; ymm1 = Re @ x7, x6, x5, x4, 0, 0, 0, 0
+		; ymm12 = [ 0 .. Im(x3..x0)]
+		; ymm14 = [ 0 .. Im(x7..x4)]
+	sub RSP, 4 * 8 * 2 * 2;
+	call ProcessLOandLE; Вызов функции вычисления Re(o-s, e-s)
+	vmovups ymm7, ymm5	; ymm7 = [ Re(o1B, o1U, o1B, o1U,	o0B, o0U, o0B, o0U ) ]
+	vmovups ymm8, ymm6	; ymm8 = [ Re(e1B, e1U, e1B, e1U,	e0B, e0U, e0B, e0U ) ]
+	vmovups ymm0, ymm12;
+	vmovups ymm1, ymm14;
+	call ProcessLOandLE; Вызов функции вычисления Im(o-s, e-s)
+		; ymm5 = Im(o-s)
+		; ymm6 = Im(e-s)
+		; ymm7 = Re(o-s)
+		; ymm8 = Re(e-s)
+	; Calculating o*w
+	
+	vmovups ymm0, [ ReRMV ]	; Загрузка векторов-множителей
+	vmovups ymm1, [ ReIMV ]	;
+	vmovups ymm2, [ ImRMV ]	;
+	
+	vmulps ymm1, ymm1, ymm15; Умножение множителей Im(MV) на Sign(Im(w(1, 8))*(-1)
+	vmulps ymm2, ymm2, ymm15;
+	
+	vmulps ymm9, ymm7, ymm0		;
+	vmulps ymm10, ymm5, ymm1	;
+	vaddps ymm11, ymm9, ymm10	;
+		; ymm11 = Re(o-s * w)
+	vmulps ymm9, ymm7, ymm2		;
+	vmulps ymm10, ymm5, ymm0	; ImIMV = ReRMV
+	vaddps ymm12, ymm9, ymm10	;
+		; ymm12 = Im(o-s * w)
+		
+		; ymm12 = Im(o-s * w)
+		; ymm6 = Im(e-s)
+		; ymm11 = Re(o-s * w)
+		; ymm8 = Re(e-s)
+	
+	vaddps ymm9, ymm8, ymm11			; ymm9 =	Re(O[1], E[1], O[3], E[3], O[0], E[0], O[2], E[2])
+	vaddps ymm10, ymm6, ymm12			; ymm10 =	Im(O[1], E[1], O[3], E[3], O[0], E[0], O[2], E[2])
+
+	vpermilps ymm5, ymm9, 10100000b		; ymm5 =	Re(E[1], E[1], E[3], E[3], E[0], E[0], E[2], E[2])
+	vpermilps ymm6, ymm10, 10100000b	; ymm6 =	Im(E[1], E[1], E[3], E[3], E[0], E[0], E[2], E[2])
+	vpermilps ymm7, ymm9, 11110101b		; ymm7 =	Re(O[1], O[1], O[3], O[3], O[0], O[0], O[2], O[2])
+	vpermilps ymm8, ymm10, 11110101b	; ymm8 =	Im(O[1], O[1], O[3], O[3], O[0], O[0], O[2], O[2])
+
+	vmovups ymm0, [ XReRMV ]	;
+	vmovups ymm1, [ XReIMV ]	;
+	vmovups ymm2, [ XImRMV ]	;
+	
+	vmulps ymm1, ymm1, ymm13; Умножение множителей Im(MV) на Sign(Im(w(1, 8))*(-1)
+	vmulps ymm2, ymm2, ymm13;
+
+	vmulps ymm9, ymm7, ymm0		;
+	vmulps ymm10, ymm8, ymm1	;
+	vaddps ymm11, ymm9, ymm10	;
+		; ymm11 = Re(O-s)
+
+	vmulps ymm9, ymm7, ymm2		;
+	vmulps ymm10, ymm8, ymm0	; ImIMV = ReRMV
+	vaddps ymm12, ymm9, ymm10	;
+		; ymm12 = Im(O-s)
+		
+		; ymm5 =	Re(E[1], E[1], E[3], E[3], E[0], E[0], E[2], E[2])
+		; ymm6 =	Im(E[1], E[1], E[3], E[3], E[0], E[0], E[2], E[2])
+		; ymm11 =	Re[ O1, O5, O3, O7, O0, O4, O2, O6 ]
+		; ymm12 =	Im[ O1, O5, O3, O7, O0, O4, O2, O6 ]
+
+	vaddps ymm0, ymm5, ymm11;
+	vaddps ymm1, ymm6, ymm12;
+	vmovups ymmword ptr [RSP], ymm0
+	vmovups ymmword ptr [RSP + 4 * 8], ymm1
+
+	; Запись результатов
+	;	[ 0 1 2 3	4 5 6 7 ] -> [ 6 2 4 0	7 3 5 1 ]
+	
+	vmovss dword ptr [ RCX + 4 * 6 ], xmm0	;
+	vperm2f128 ymm0, ymm0, ymm0, 00000001b	;
+	vmovss dword ptr [ RCX + 4 * 7 ], xmm0	;
+	vpermilps ymm0, ymm0, 10010011b			;
+	vmovss dword ptr [ RCX + 4 * 1 ], xmm0	;
+	vperm2f128 ymm0, ymm0, ymm0, 00000001b	;
+	vmovss dword ptr [ RCX ], xmm0			;
+	vpermilps ymm0, ymm0, 10010011b			;
+	vmovss dword ptr [ RCX + 4 * 4 ], xmm0	;
+	vperm2f128 ymm0, ymm0, ymm0, 00000001b	;
+	vmovss dword ptr [ RCX + 4 * 5], xmm0	;
+	vpermilps ymm0, ymm0, 10010011b			;
+	vmovss dword ptr [ RCX + 4 * 3 ], xmm0	;
+	vperm2f128 ymm0, ymm0, ymm0, 00000001b	;
+	vmovss dword ptr [ RCX + 4 * 2], xmm0	;
+	vpermilps ymm0, ymm0, 10010011b			;
+	
+	vmovss dword ptr [ RCX + 4 * (8 + 6) ], xmm1	;
+	vperm2f128 ymm1, ymm1, ymm1, 00000001b			;
+	vmovss dword ptr [ RCX + 4 * (8 + 7) ], xmm1	;
+	vpermilps ymm1, ymm1, 10010011b					;
+	vmovss dword ptr [ RCX + 4 * (8 + 1) ], xmm1	;
+	vperm2f128 ymm1, ymm1, ymm1, 00000001b			;
+	vmovss dword ptr [ RCX + 4 * 8 ], xmm0			;
+	vpermilps ymm1, ymm1, 10010011b					;
+	vmovss dword ptr [ RCX + 4 * (8 + 4) ], xmm1	;
+	vperm2f128 ymm1, ymm1, ymm1, 00000001b			;
+	vmovss dword ptr [ RCX + 4 * (8 + 5) ], xmm1	;
+	vpermilps ymm1, ymm1, 10010011b					;
+	vmovss dword ptr [ RCX + 4 * (8 + 3) ], xmm1	;
+	vperm2f128 ymm1, ymm1, ymm1, 00000001b			;
+	vmovss dword ptr [ RCX + 4 * (8 + 2) ], xmm1	;
+	vpermilps ymm1, ymm1, 10010011b					;
+
+	add RSP, 4 * 8 * 2 * 2;
+	ret
+FourierTransform ENDP
+
 ; -------------------------------------------------------------------------------------	;
 ; void CalculateSpectrum(spectrum_type* Spectrum, signal_type* Signal)					;
 ;	Прямое преобразование Фурье. Вычисляет спектр Spectrum по сигналу Signal			;
@@ -14,13 +250,14 @@
 ; -------------------------------------------------------------------------------------	;
 CalculateSpectrum PROC	; [RCX] - Spectrum
 						; [RDX] - Signal
-
-		; Обозначения:
-		;	e[i]- верхний вектор длины 4	(Именование идентично для обеих бабочек)
-		;	o[i]- нижний вектор длины 4		(Именование идентично для обеих бабочек)
-		;	E[i]- верхний вектор длины 8
-		;	O[i]- нижний вектор длины 8
-
+	push RCX
+	push RDX
+	mov eax, 1	; Проверка поддержки
+	cpuid		;	AVX процессором
+	bt ecx, 28
+	jc AVX_SUPPORTED
+	pop RDX
+	pop RCX
 	push R12		; Сохранение non-volatile регистров
 	push R13		;	в стек перед началом работы
 	push R14		;	подпрограммы с целью
@@ -287,6 +524,41 @@ CalculateSpectrum PROC	; [RCX] - Spectrum
 	pop R12
 
 	ret
+	AVX_SUPPORTED:
+
+	pop RDX
+	pop RCX
+
+	sub RSP, 4 * 8 * 2 * 2;
+
+	vzeroall;
+	vmovups xmm1, dword ptr [RDX + 4]	; Получение нужных
+	vmovups xmm0, dword ptr [RDX]		;	данных из памяти
+	vpmovsxbd xmm0, xmm0				;	и их запись в
+	vpmovsxbd xmm1, xmm1				;	необходимом для
+	vcvtdq2ps xmm0, xmm0				;	корректной работы
+	vcvtdq2ps xmm1, xmm1				;	функции виде
+	vpermilps ymm0, ymm0, 00011011b;
+	vpermilps ymm1, ymm1, 00011011b;
+		; ymm0 = [ 0 .. Re(x3..x0) ]
+		; ymm1 = [ 0 .. Re(x7..x4) ]
+		; ymm12 = [ 0 .. Im(x3..x0) ]
+		; ymm14 = [ 0 .. Im(x7..x4) ]
+	
+	vmovups xmmword ptr [RSP], xmm0;
+	vmovups xmmword ptr [RSP + 4 * 4], xmm1;
+	vmovups ymm13, ymmword ptr [NormalMV];
+	vmovups ymm15, ymmword ptr [NormalMV];
+	
+	push RCX;
+	push RDX;
+	mov RDX, RSP;
+	call FourierTransform
+	pop RDX;
+	pop RCX;
+	add RSP, 4 * 8 * 2 * 2;
+
+	ret
 CalculateSpectrum ENDP
 ; -------------------------------------------------------------------------------------	;
 ; void RecoverSignal(signal_type* Signal, spectrum_type* Spectrum)						;
@@ -298,6 +570,16 @@ CalculateSpectrum ENDP
 RecoverSignal PROC	; [RCX] - Signal
 					; [RDX] - Spectrum
 
+	sub RSP, 4 * 8 * 7; Выделение места
+	
+	push RCX
+	push RDX
+	mov eax, 1	; Проверка поддержки
+	cpuid		;	AVX процессором
+	bt ecx, 28
+	jc AVX_SUPPORTED
+	pop RDX
+	pop RCX
 	sub RSP, (8 * 2) * 8; Выделение места для 8 комплексных чисел
 
 	finit
@@ -576,6 +858,58 @@ RecoverSignal PROC	; [RCX] - Signal
 	; push 1
 
 	add RSP, (8 * 2) * 8 + 8;
+	ret
+
+	AVX_SUPPORTED:
+	pop RDX
+	pop RCX
+	vzeroall;
+	vmovups xmm0, xmmword ptr [RDX]					; Получение нужных
+	vmovups xmm1, xmmword ptr [RDX + 4 * 4]			;	данных из памяти
+	vmovups xmm12, xmmword ptr [RDX + 4 * 8]		;	и их запись
+	vmovups xmm14, xmmword ptr [RDX + 4 * (8 + 4)]	;	в необходимом
+	vpermilps ymm0, ymm0, 00011011b					;	для корректной работы
+	vpermilps ymm1, ymm1, 00011011b					;	функции виде
+	vpermilps ymm12, ymm12, 00011011b				;	в регистры
+	vpermilps ymm14, ymm14, 00011011b				;	ymm(0, 1, 12, 14)
+
+	push RCX
+	push RDX
+	mov RCX, RSP
+	add RCX, 4 * 8 * 2
+	vmovups ymm13, ymmword ptr [XImMV]	; Запись соответствующего
+	vmovups ymm15, ymmword ptr [ImMV]	;	множителя (Spectrum -> Signal)
+	call FourierTransform				; Вызов функции для вычисления X[0-7]
+	vmovups ymm0, [RCX]					; Запись результата в регистр ymm0
+	pop RDX
+	pop RCX
+
+	vmovups ymm2, [const18] ; Деление результата на 1/8
+	vmulps ymm0, ymm0, ymm2
+	vmulps ymm1, ymm1, ymm2
+	vcvtps2dq ymm0, ymm0
+
+	; vpmovdb xmm0, ymm0- AVX512
+	; Запись результата в виде массива int8
+	vmovups ymmword ptr [RSP], ymm0
+	mov r8b, byte ptr [RSP]
+	mov byte ptr [RCX], r8b;
+	mov r8b, byte ptr [RSP + 4 * 1]
+	mov byte ptr [RCX + 1], r8b;
+	mov r8b, byte ptr [RSP + 4 * 2]
+	mov byte ptr [RCX + 2], r8b;
+	mov r8b, byte ptr [RSP + 4 * 3]
+	mov byte ptr [RCX + 3], r8b;
+	mov r8b, byte ptr [RSP + 4 * 4]
+	mov byte ptr [RCX + 4], r8b;
+	mov r8b, byte ptr [RSP + 4 * 5]
+	mov byte ptr [RCX + 5], r8b;
+	mov r8b, byte ptr [RSP + 4 * 6]
+	mov byte ptr [RCX + 6], r8b;
+	mov r8b, byte ptr [RSP + 4 * 7]
+	mov byte ptr [RCX + 7], r8b;
+
+	add RSP, 4 * 8 * 7
 
 	ret
 RecoverSignal ENDP
